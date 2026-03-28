@@ -284,7 +284,7 @@ All commands use the script at `~/.claude/skills/terminal-firefox/marionette.mjs
 
 # 2. Get info
 ~/.claude/skills/terminal-firefox/marionette.mjs title
-~/.claude/skills/terminal-firefox/marionette.mjs eval "document.body.innerText.slice(0, 3000)"
+~/.claude/skills/terminal-firefox/marionette.mjs eval "document.querySelector('main')?.innerText?.slice(0, 3000)"
 
 # 3. Interact
 ~/.claude/skills/terminal-firefox/marionette.mjs click "a.nav-link"
@@ -299,6 +299,14 @@ All commands use the script at `~/.claude/skills/terminal-firefox/marionette.mjs
 ```bash
 tmux kill-pane -t "$PANE_ID" 2>/dev/null
 ```
+
+## Known limitations
+
+- **`eval` on large DOM trees is unreliable.** Calling `document.body.innerText` on heavy pages (YouTube, Wikipedia, SPAs) will hang or return empty because `innerText` triggers a full CSS layout reflow via Marionette. Workarounds:
+  - Target a specific selector instead: `document.querySelector('main')?.innerText?.slice(0, 3000)`
+  - Use `textContent` instead of `innerText` (no reflow, but includes script/style text)
+  - Use `document.title` or `meta` tags for quick page info
+  - Use `shot` for a visual snapshot — screenshots are always reliable
 
 ## Notes
 
