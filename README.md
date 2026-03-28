@@ -1,18 +1,30 @@
-# terminal-firefox (Claude Code Skill)
+# terminal-firefox (Claude Code Plugin)
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that gives Claude a full Firefox browser in your terminal. Browse, inspect, and interact with web pages using Marionette -- all from within a Claude Code session.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that gives Claude a full Firefox browser in your terminal. Browse, inspect, and interact with web pages using Marionette -- all from within a Claude Code session.
 
 Built on [Browsh](https://github.com/browsh-org/browsh), which renders Firefox as text and ANSI colors in the terminal. Works in any terminal, including tmux and over SSH.
 
+## Demo
+
+<table>
+  <tbody>
+    <tr>
+      <td>
+        <video src="https://github.com/gyoz-ai/terminal-firefox-skill/raw/main/demo.mp4">
+      </td>
+    </tr>
+  </tbody>
+</table>
+
 ## How it works
 
-Browsh launches headless Firefox and renders pages in the terminal via a WebExtension. This skill adds **programmatic control** by creating a second Marionette session alongside Browsh, giving Claude full access to navigate, evaluate JS, click elements, type, extract HTML, and take screenshots.
+Browsh launches headless Firefox and renders pages in the terminal via a WebExtension. This plugin adds **programmatic control** by creating a second Marionette session alongside Browsh, giving Claude full access to navigate, evaluate JS, click elements, type, extract HTML, and take screenshots.
 
-Firefox's Marionette protocol is hardcoded to allow only 1 session. This skill includes a **one-time patch** to Firefox's `omni.ja` (internal JS modules) that removes this limit, enabling Browsh and the control script to coexist.
+Firefox's Marionette protocol is hardcoded to allow only 1 session. This plugin includes a **one-time patch** to Firefox's `omni.ja` (internal JS modules) that removes this limit, enabling Browsh and the control script to coexist.
 
 ### What gets patched
 
-Three files inside `/Applications/Firefox.app/Contents/Resources/omni.ja`:
+Three files inside Firefox's `omni.ja`:
 
 | File | Change |
 |------|--------|
@@ -47,6 +59,22 @@ When you invoke `/terminal-firefox`, Claude will:
 | `refresh` | Refresh page |
 | `windows` | List all open windows |
 
+### Example conversation
+
+```
+You: /terminal-firefox open https://news.ycombinator.com
+
+Claude: [launches Browsh, patches Firefox if needed, lists page title]
+  Hacker News
+
+You: get me the top 5 story titles
+
+Claude: [runs eval to extract titles]
+  1. Show HN: I built a thing
+  2. Why Rust is taking over
+  ...
+```
+
 ## Requirements
 
 - **Firefox 57+** -- `brew install --cask firefox` (macOS) or package manager (Linux)
@@ -58,18 +86,41 @@ Browsh is auto-installed on first run if missing.
 
 ## Installation
 
-```bash
-mkdir -p ~/.claude/skills/terminal-firefox
-cp skills/terminal-firefox/SKILL.md ~/.claude/skills/terminal-firefox/
-cp skills/terminal-firefox/marionette.mjs ~/.claude/skills/terminal-firefox/
-chmod +x ~/.claude/skills/terminal-firefox/marionette.mjs
+### Option 1: Plugin Directory (recommended)
+
+Install directly from the Claude Code plugin directory:
+
+```
+/plugins
 ```
 
-Or symlink:
+Search for **terminal-firefox** and install it.
+
+### Option 2: Install plugin from GitHub
+
+```bash
+# In any Claude Code session:
+/install-plugin https://github.com/gyoz-ai/terminal-firefox-skill
+```
+
+### Option 3: Manual install
+
+Clone and symlink the skill:
 
 ```bash
 git clone https://github.com/gyoz-ai/terminal-firefox-skill.git ~/terminal-firefox-skill
 ln -s ~/terminal-firefox-skill/skills/terminal-firefox ~/.claude/skills/terminal-firefox
+```
+
+Or copy directly:
+
+```bash
+mkdir -p ~/.claude/skills/terminal-firefox
+curl -o ~/.claude/skills/terminal-firefox/SKILL.md \
+  https://raw.githubusercontent.com/gyoz-ai/terminal-firefox-skill/main/skills/terminal-firefox/SKILL.md
+curl -o ~/.claude/skills/terminal-firefox/marionette.mjs \
+  https://raw.githubusercontent.com/gyoz-ai/terminal-firefox-skill/main/skills/terminal-firefox/marionette.mjs
+chmod +x ~/.claude/skills/terminal-firefox/marionette.mjs
 ```
 
 ## Usage
@@ -90,12 +141,26 @@ Inside tmux:
 |    conversation           |    rendering in terminal  |
 |                           |                           |
 |    marionette.mjs         |    Session #1: Browsh     |
-|    Session #2: control    |    (WebExtension ↔ Go)    |
+|    Session #2: control    |    (WebExtension + Go)    |
 |         |                 |         |                 |
 |         +--- Marionette port 2828 --+                 |
 |                           |                           |
 +---------------------------+---------------------------+
                     tmux split pane
+```
+
+## Plugin structure
+
+```
+terminal-firefox-skill/
+├── .claude-plugin/
+│   └── plugin.json
+├── skills/
+│   └── terminal-firefox/
+│       ├── SKILL.md
+│       └── marionette.mjs
+├── LICENSE
+└── README.md
 ```
 
 ## Differences from terminal-chromium
@@ -105,15 +170,15 @@ Inside tmux:
 | Engine | Chromium (Carbonyl) | Firefox (Browsh) |
 | Protocol | CDP (native) | Marionette (patched multi-session) |
 | Rendering | Unicode half-block chars | Text + ANSI colors |
+| Maintenance | Carbonyl unmaintained | Browsh actively maintained |
 | Setup | Zero-config | One-time Firefox patch |
-| Performance | 60 FPS, <1s startup | ~3s startup, moderate FPS |
 
-Both skills can run simultaneously.
+Both plugins can run simultaneously.
 
 ## Credits
 
 - [Browsh](https://github.com/browsh-org/browsh) by Thomas Buckley-Houston
-- [terminal-chromium-skill](https://github.com/gyoz-ai/terminal-chromium-skill) -- sister skill
+- [terminal-chromium-skill](https://github.com/gyoz-ai/terminal-chromium-skill) -- sister plugin
 
 ## License
 

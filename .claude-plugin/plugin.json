@@ -1,0 +1,11 @@
+{
+  "name": "terminal-firefox",
+  "version": "1.0.0",
+  "description": "Full Firefox browser in your terminal via Browsh + Marionette, with multi-session patch for programmatic control",
+  "author": {
+    "name": "gyoz-ai",
+    "url": "https://github.com/gyoz-ai"
+  },
+  "repository": "https://github.com/gyoz-ai/terminal-firefox-skill",
+  "license": "MIT"
+}
