@@ -1,70 +1,71 @@
 # terminal-firefox (Claude Code Skill)
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that gives Claude a full Firefox browser in your terminal. Browse, inspect, and interact with web pages using CDP (Chrome DevTools Protocol) -- all from within a Claude Code session.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that gives Claude a full Firefox browser in your terminal. Browse, inspect, and interact with web pages using Marionette -- all from within a Claude Code session.
 
 Built on [Browsh](https://github.com/browsh-org/browsh), which renders Firefox as text and ANSI colors in the terminal. Works in any terminal, including tmux and over SSH.
+
+## How it works
+
+Browsh launches headless Firefox and renders pages in the terminal via a WebExtension. This skill adds **programmatic control** by creating a second Marionette session alongside Browsh, giving Claude full access to navigate, evaluate JS, click elements, type, extract HTML, and take screenshots.
+
+Firefox's Marionette protocol is hardcoded to allow only 1 session. This skill includes a **one-time patch** to Firefox's `omni.ja` (internal JS modules) that removes this limit, enabling Browsh and the control script to coexist.
+
+### What gets patched
+
+Three files inside `/Applications/Firefox.app/Contents/Resources/omni.ja`:
+
+| File | Change |
+|------|--------|
+| `server.sys.mjs` | Removes connection rejection when a session exists |
+| `driver.sys.mjs` | Removes session creation limit |
+| `WebDriverBiDi.sys.mjs` | Removes BiDi session creation limit |
+
+The original `omni.ja` is backed up to `omni.ja.bak`. The patch must be re-applied after Firefox updates.
 
 ## What it does
 
 When you invoke `/terminal-firefox`, Claude will:
 
-1. Launch Firefox headless with CDP enabled
-2. Launch Browsh in a tmux split pane connected to Firefox for terminal rendering
-3. Navigate to any URL you specify
-4. Interact with pages programmatically via CDP (click, type, evaluate JS, get page content)
+1. Check prerequisites (tmux, browsh, firefox, node)
+2. Patch Firefox if needed (one-time)
+3. Launch Browsh in a tmux split pane (terminal rendering)
+4. Control the browser via Marionette (programmatic access)
 
-### CDP Commands
-
-Once the browser is running, Claude uses these commands to control it:
+### Commands
 
 | Command | Description |
 |---------|-------------|
-| `list` | List open tabs |
-| `nav <target> <url>` | Navigate to a URL |
-| `eval <target> <expr>` | Evaluate JavaScript |
-| `click <target> <selector>` | Click an element by CSS selector |
-| `clickxy <target> <x> <y>` | Click at coordinates |
-| `type <target> <text>` | Type text |
-| `html <target> [selector]` | Get page HTML |
-| `shot <target> [file]` | Take a screenshot (PNG) |
-| `open [url]` | Open a new tab |
-| `evalraw <target> <method> [json]` | Send raw CDP command |
-
-### Example conversation
-
-```
-You: /terminal-firefox open https://news.ycombinator.com
-
-Claude: [launches Firefox + Browsh, lists tabs]
-  A1B2C3D4  Hacker News  https://news.ycombinator.com/
-
-You: get me the top 5 story titles
-
-Claude: [runs eval to extract titles]
-  1. Show HN: I built a thing
-  2. Why Rust is taking over
-  ...
-```
+| `nav <url>` | Navigate to a URL |
+| `eval <expr>` | Evaluate JavaScript |
+| `click <selector>` | Click an element by CSS selector |
+| `type <selector> <text>` | Type text into element |
+| `html [selector]` | Get page HTML |
+| `shot [file]` | Take a screenshot (PNG) |
+| `title` | Get page title |
+| `url` | Get current URL |
+| `back` / `forward` | Navigate history |
+| `refresh` | Refresh page |
+| `windows` | List all open windows |
 
 ## Requirements
 
-- **Firefox 57+** -- installed via `brew install --cask firefox` (macOS) or your package manager (Linux)
+- **Firefox 57+** -- `brew install --cask firefox` (macOS) or package manager (Linux)
 - **tmux** -- for split pane rendering
-- **Node.js 21+** -- for the CDP control script
+- **Node.js 21+** -- for the Marionette control script
+- **python3** -- for the Firefox patch script
 
 Browsh is auto-installed on first run if missing.
 
 ## Installation
 
 ```bash
-# Copy skill files
 mkdir -p ~/.claude/skills/terminal-firefox
 cp skills/terminal-firefox/SKILL.md ~/.claude/skills/terminal-firefox/
-cp skills/terminal-firefox/cdp.mjs ~/.claude/skills/terminal-firefox/
-chmod +x ~/.claude/skills/terminal-firefox/cdp.mjs
+cp skills/terminal-firefox/marionette.mjs ~/.claude/skills/terminal-firefox/
+chmod +x ~/.claude/skills/terminal-firefox/marionette.mjs
 ```
 
-Or symlink to stay updated:
+Or symlink:
 
 ```bash
 git clone https://github.com/gyoz-ai/terminal-firefox-skill.git ~/terminal-firefox-skill
@@ -73,19 +74,14 @@ ln -s ~/terminal-firefox-skill/skills/terminal-firefox ~/.claude/skills/terminal
 
 ## Usage
 
-Start a Claude Code session inside tmux, then:
+Inside tmux:
 
 ```bash
-# Open a page
 /terminal-firefox open https://example.com
-
-# Or just invoke it and tell Claude what to browse
-/terminal-firefox go to the Rust documentation
+/terminal-firefox search for the latest Rust release notes
 ```
 
-Claude handles the browser launch, CDP interaction, and pane management automatically.
-
-## How it works
+## Architecture
 
 ```
 +---------------------------+---------------------------+
@@ -93,42 +89,31 @@ Claude handles the browser launch, CDP interaction, and pane management automati
 |    Claude Code            |    Browsh (Firefox)       |
 |    conversation           |    rendering in terminal  |
 |                           |                           |
-|    Uses cdp.mjs to        |    Connects to Firefox    |
-|    send CDP commands  --> |    via --firefox.use-      |
-|    (port 9333+)           |    existing                |
+|    marionette.mjs         |    Session #1: Browsh     |
+|    Session #2: control    |    (WebExtension ↔ Go)    |
+|         |                 |         |                 |
+|         +--- Marionette port 2828 --+                 |
 |                           |                           |
 +---------------------------+---------------------------+
                     tmux split pane
-
-  Firefox runs headless with both:
-  - --marionette (port 2828, for Browsh)
-  - --remote-debugging-port (port 9333+, for CDP control)
 ```
 
 ## Differences from terminal-chromium
 
 | | terminal-chromium | terminal-firefox |
 |--|---|---|
-| Engine | Chromium (via Carbonyl) | Firefox (via Browsh) |
+| Engine | Chromium (Carbonyl) | Firefox (Browsh) |
+| Protocol | CDP (native) | Marionette (patched multi-session) |
 | Rendering | Unicode half-block chars | Text + ANSI colors |
-| CDP port range | 9222-9230 | 9333-9340 |
-| Performance | 60 FPS, <1s startup | Slower startup (~5s), moderate FPS |
-| CDP support | Full (native Chromium) | Partial (Firefox's CDP subset) |
+| Setup | Zero-config | One-time Firefox patch |
+| Performance | 60 FPS, <1s startup | ~3s startup, moderate FPS |
 
-Both skills can run simultaneously since they use different port ranges.
-
-## Notes
-
-- Firefox 57+ required for Browsh's WebExtension
-- Uses CDP port range 9333-9340 (no conflicts with terminal-chromium)
-- Some advanced CDP commands (accessibility tree) may not be supported by Firefox's CDP
-- Works over SSH
-- Heavy JS sites may be slow -- simpler pages work best
+Both skills can run simultaneously.
 
 ## Credits
 
-- [Browsh](https://github.com/browsh-org/browsh) by Thomas Buckley-Houston -- terminal Firefox renderer
-- [terminal-chromium-skill](https://github.com/gyoz-ai/terminal-chromium-skill) -- sister skill for Chromium
+- [Browsh](https://github.com/browsh-org/browsh) by Thomas Buckley-Houston
+- [terminal-chromium-skill](https://github.com/gyoz-ai/terminal-chromium-skill) -- sister skill
 
 ## License
 
