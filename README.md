@@ -6,11 +6,14 @@ Built on [Browsh](https://github.com/browsh-org/browsh), which renders Firefox a
 
 ## Demo
 
+
+
+
 <table>
   <tbody>
     <tr>
       <td>
-        <video src="https://github.com/gyoz-ai/terminal-firefox-skill/raw/main/demo.mp4">
+        <video src="https://github.com/user-attachments/assets/8c51a22b-2d6f-45d1-a937-0f9befff8372">
       </td>
     </tr>
   </tbody>
