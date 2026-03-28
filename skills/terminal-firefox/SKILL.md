@@ -1,27 +1,22 @@
 ---
 name: terminal-firefox
-description: Terminal-native Firefox browser with CDP remote debugging via Browsh. Renders real web pages in the terminal using text and color. Use for browsing, debugging, testing, and inspecting web pages. Based on browsh (https://github.com/browsh-org/browsh).
+description: Terminal-native Firefox browser with Marionette remote control via Browsh. Renders real web pages in the terminal using text and color. Requires a one-time Firefox patch to allow multiple Marionette sessions (Browsh + control script). Use for browsing, debugging, testing, and inspecting web pages.
 ---
 
 # Terminal Firefox
 
-A full Firefox browser that renders in your terminal via Browsh. Uses CDP (Chrome DevTools Protocol, supported by Firefox 86+) for programmatic control.
+A full Firefox browser that renders in your terminal via Browsh. Uses Firefox's Marionette protocol for programmatic control — navigate, evaluate JS, click, type, extract HTML, and take screenshots.
 
 ## How it works
 
-- **Browsh** renders Firefox in the terminal by capturing headless Firefox output via a WebExtension
-- Firefox is launched with `--remote-debugging-port=PORT` to expose a CDP endpoint at `http://127.0.0.1:PORT`
-- Browsh connects to the same Firefox instance via `--firefox.use-existing` for terminal rendering
-- The `cdp.mjs` script connects to the CDP endpoint to control the browser
-- Multiple instances can run on different ports (9333, 9334, 9335, ...)
+- **Browsh** renders Firefox in the terminal via a WebExtension that captures headless Firefox output
+- Browsh holds **Marionette session #1** for its internal communication with Firefox
+- The `marionette.mjs` script creates **session #2** and switches to Browsh's browser window for control
+- Firefox is patched (one-time) to allow multiple concurrent Marionette sessions (default is hardcoded to 1)
 
 ## Launch browser (when /terminal-firefox is invoked)
 
-When this skill is invoked, run through these prerequisite checks first, then launch.
-
 ### Step 1: Check prerequisites
-
-Run all checks in a single bash command:
 
 ```bash
 echo "=== Prerequisite Check ===" && \
@@ -29,7 +24,13 @@ echo -n "tmux: " && (command -v tmux >/dev/null 2>&1 && echo "OK" || echo "MISSI
 echo -n "browsh: " && (command -v browsh >/dev/null 2>&1 && echo "OK ($(browsh --version 2>/dev/null))" || (test -x "$HOME/.local/share/terminal-firefox/browsh" && echo "OK (local)" || echo "MISSING")) && \
 echo -n "firefox: " && (command -v firefox >/dev/null 2>&1 && echo "OK" || (test -x "/Applications/Firefox.app/Contents/MacOS/firefox" && echo "OK (macOS app)" || echo "MISSING")) && \
 echo -n "node: " && (node -v 2>/dev/null || echo "MISSING") && \
-echo -n "tmux session: " && ([ -n "$TMUX" ] && echo "OK" || echo "NOT IN TMUX")
+echo -n "tmux session: " && ([ -n "$TMUX" ] && echo "OK" || echo "NOT IN TMUX") && \
+echo -n "firefox patch: " && (python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('/Applications/Firefox.app/Contents/Resources/omni.ja' if sys.platform=='darwin' else '/usr/lib/firefox/omni.ja','r') as z:
+    c=z.read('chrome/remote/content/marionette/server.sys.mjs').decode()
+    print('OK' if 'if (false)' in c else 'NEEDS_PATCH')
+" 2>/dev/null || echo "NEEDS_PATCH")
 ```
 
 **If tmux is MISSING**: Tell the user to install it (`brew install tmux` on macOS, `apt install tmux` on Linux). Stop here.
@@ -40,7 +41,7 @@ echo -n "tmux session: " && ([ -n "$TMUX" ] && echo "OK" || echo "NOT IN TMUX")
 
 Firefox 57+ is required. Stop here.
 
-**If browsh is MISSING**: Install it automatically by running:
+**If browsh is MISSING**: Install it automatically:
 
 ```bash
 ARCH=$(uname -m); OS=$(uname -s)
@@ -61,21 +62,109 @@ chmod +x "$INSTALL_DIR/browsh"
 echo "$INSTALL_DIR/browsh installed"
 ```
 
-Then add to PATH if needed:
-```bash
-if ! echo "$PATH" | grep -q "terminal-firefox"; then
-  echo 'export PATH="$HOME/.local/share/terminal-firefox:$PATH"' >> ~/.zshrc
-  export PATH="$HOME/.local/share/terminal-firefox:$PATH"
-fi
-```
-
 **If NOT IN TMUX**: Tell the user: "The browser needs tmux to open in a split pane. Run `/exit`, then `tmux new-session "claude --resume"` to relaunch inside tmux." Stop here.
 
-**If all OK**: Continue to Step 2.
+**If firefox patch is NEEDS_PATCH**: Continue to Step 2 to patch Firefox.
 
-### Step 2: Ensure tmux config
+**If all OK**: Skip to Step 3.
 
-Check if tmux settings are already configured. Only apply what's missing:
+### Step 2: Patch Firefox for multi-session Marionette
+
+Firefox hardcodes a limit of 1 Marionette session. Browsh takes that session for terminal rendering.
+We patch 3 files inside Firefox's `omni.ja` (a ZIP archive of internal JS modules) to allow multiple
+concurrent sessions. This lets our `marionette.mjs` control script create session #2 alongside Browsh.
+
+**Files patched:**
+- `chrome/remote/content/marionette/server.sys.mjs` — connection rejection when session exists
+- `chrome/remote/content/marionette/driver.sys.mjs` — session creation limit
+- `chrome/remote/content/webdriver-bidi/WebDriverBiDi.sys.mjs` — BiDi session creation limit
+
+**This patch must be re-applied after Firefox updates.**
+
+```bash
+python3 << 'PATCH_SCRIPT'
+import zipfile, os, sys, shutil, tempfile
+
+if sys.platform == 'darwin':
+    omni_path = '/Applications/Firefox.app/Contents/Resources/omni.ja'
+else:
+    omni_path = '/usr/lib/firefox/omni.ja'
+
+backup_path = omni_path + '.bak'
+
+# Backup original if no backup exists
+if not os.path.exists(backup_path):
+    shutil.copy2(omni_path, backup_path)
+    print(f"Backed up original to {backup_path}")
+
+# Patches: replace session limit checks with `if (false)`
+patches = {
+    'chrome/remote/content/marionette/server.sys.mjs': (
+        'if (hasActiveSession) {',
+        'if (false) {'
+    ),
+    'chrome/remote/content/marionette/driver.sys.mjs': (
+        'if (this.currentSession) {\n    throw new lazy.error.SessionNotCreatedError(\n      "Maximum number of active sessions"',
+        'if (false) {\n    throw new lazy.error.SessionNotCreatedError(\n      "Maximum number of active sessions"'
+    ),
+    'chrome/remote/content/webdriver-bidi/WebDriverBiDi.sys.mjs': (
+        'if (this.#session) {\n      throw new lazy.error.SessionNotCreatedError(\n        "Maximum number of active sessions"',
+        'if (false) {\n      throw new lazy.error.SessionNotCreatedError(\n        "Maximum number of active sessions"'
+    ),
+}
+
+# Extract all files
+tmp_dir = tempfile.mkdtemp(prefix='firefox-patch-')
+with zipfile.ZipFile(omni_path, 'r') as zin:
+    zin.extractall(tmp_dir)
+
+# Apply patches
+patched = 0
+for filepath, (old, new) in patches.items():
+    full_path = os.path.join(tmp_dir, filepath)
+    if os.path.exists(full_path):
+        with open(full_path, 'r') as f:
+            content = f.read()
+        if old in content:
+            content = content.replace(old, new)
+            with open(full_path, 'w') as f:
+                f.write(content)
+            patched += 1
+            print(f"Patched: {filepath}")
+        elif new.split('{')[0] in content:
+            print(f"Already patched: {filepath}")
+            patched += 1
+        else:
+            print(f"WARNING: patch target not found in {filepath}")
+
+# Rebuild omni.ja with stored compression (required by Firefox)
+if patched > 0:
+    new_omni = omni_path + '.new'
+    with zipfile.ZipFile(new_omni, 'w', compression=zipfile.ZIP_STORED) as zout:
+        for root, dirs, files in os.walk(tmp_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, tmp_dir)
+                zout.write(file_path, arcname)
+    os.replace(new_omni, omni_path)
+    print(f"Rebuilt {omni_path} with {patched} patches applied")
+
+# Clear startup caches
+for cache_dir in [
+    os.path.expanduser('~/Library/Application Support/browsh/firefox_profile/startupCache'),
+    os.path.expanduser('~/Library/Caches/Firefox'),
+]:
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        print(f"Cleared cache: {cache_dir}")
+
+# Cleanup
+shutil.rmtree(tmp_dir, ignore_errors=True)
+print("Firefox patched for multi-session Marionette support")
+PATCH_SCRIPT
+```
+
+### Step 3: Ensure tmux config
 
 ```bash
 TMUX_CONF="$HOME/.tmux.conf"
@@ -103,52 +192,22 @@ else
 fi
 ```
 
-### Step 3: Check for existing Firefox CDP instance
-
-Before launching a new browser, check if Firefox is already running with an active CDP port:
+### Step 4: Check for existing Browsh instance
 
 ```bash
-# Scan ports 9333-9340 for an active CDP endpoint
-EXISTING_PORT=""
-for p in $(seq 9333 9340); do
-  if curl -s "http://127.0.0.1:$p/json/version" >/dev/null 2>&1; then
-    EXISTING_PORT=$p
-    break
-  fi
-done
-
-if [ -n "$EXISTING_PORT" ]; then
-  echo "EXISTING_INSTANCE_FOUND on port $EXISTING_PORT"
-  CDP_PORT=$EXISTING_PORT ~/.claude/skills/terminal-firefox/cdp.mjs list
+if nc -z 127.0.0.1 2828 2>/dev/null && nc -z 127.0.0.1 3334 2>/dev/null; then
+  echo "EXISTING_INSTANCE_FOUND"
+  ~/.claude/skills/terminal-firefox/marionette.mjs title
 else
   echo "NO_EXISTING_INSTANCE"
 fi
 ```
 
-**If EXISTING_INSTANCE_FOUND**: Skip launching a new browser. Use the existing CDP port for all subsequent commands. Continue to Step 5 (Use CDP).
+**If EXISTING_INSTANCE_FOUND**: Skip to Step 6 (Use Marionette).
 
-**If NO_EXISTING_INSTANCE**: Continue to Step 4 to launch a new browser.
-
-### Step 4: Launch browser
-
-This is a two-step launch: first Firefox with CDP, then Browsh connected to it.
+### Step 5: Launch browser
 
 ```bash
-# Find available CDP port
-PORT=9333
-while curl -s "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; do
-  ((PORT++))
-done
-
-# Determine Firefox path
-if command -v firefox >/dev/null 2>&1; then
-  FIREFOX_BIN="firefox"
-elif [ -x "/Applications/Firefox.app/Contents/MacOS/firefox" ]; then
-  FIREFOX_BIN="/Applications/Firefox.app/Contents/MacOS/firefox"
-else
-  echo "Firefox not found"; exit 1
-fi
-
 # Determine Browsh path
 if command -v browsh >/dev/null 2>&1; then
   BROWSH_BIN="browsh"
@@ -158,100 +217,96 @@ fi
 
 URL="${1:-https://google.com}"
 
-# Step 1: Launch Firefox headless with both Marionette (for Browsh) and CDP (for us)
-$FIREFOX_BIN --headless --marionette --remote-debugging-port=$PORT "$URL" &
-FIREFOX_PID=$!
-echo "Firefox PID=$FIREFOX_PID CDP_PORT=$PORT"
+# Launch Browsh in a tmux split pane
+PANE_ID=$(tmux split-window -h -p 50 -P -F '#{pane_id}' \
+  "$BROWSH_BIN --startup-url '$URL'")
+echo "PANE_ID=$PANE_ID"
 
-# Wait for CDP to be ready
-for i in $(seq 1 15); do
-  if curl -s "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; then
-    echo "CDP ready on port $PORT"
+# Wait for Browsh + Firefox to be ready
+for i in $(seq 1 20); do
+  if nc -z 127.0.0.1 2828 2>/dev/null; then
+    echo "Marionette ready"
     break
   fi
   sleep 1
 done
-
-# Step 2: Launch Browsh in tmux split pane, connecting to existing Firefox
-PANE_ID=$(tmux split-window -h -p 50 -P -F '#{pane_id}' \
-  "$BROWSH_BIN --firefox.use-existing --startup-url '$URL'")
-sleep 3
-
-# Verify CDP connection
-curl -s "http://127.0.0.1:$PORT/json/version" | head -3
+sleep 2
 ```
 
-### Step 5: Use CDP
+### Step 6: Use Marionette
 
-After launch, use the CDP commands below to interact with the browser programmatically.
+After launch, use the Marionette commands below to interact with the browser.
+The script auto-creates session #2 and switches to Browsh's browser window.
 
-## CDP Commands
+## Marionette Commands
 
-All commands use the CDP script at `~/.claude/skills/terminal-firefox/cdp.mjs`.
-
-Set `CDP_PORT=<port>` before every command. The `<target>` is a targetId prefix from `list`.
+All commands use the script at `~/.claude/skills/terminal-firefox/marionette.mjs`.
 
 ```bash
-# List open pages
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs list
-
-# Navigate
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs nav <target> <url>
-
-# Click element by CSS selector
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs click <target> <selector>
-
-# Click at coordinates
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs clickxy <target> <x> <y>
-
-# Type text
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs type <target> <text>
+# Navigate to URL (updates Browsh's terminal view)
+~/.claude/skills/terminal-firefox/marionette.mjs nav <url>
 
 # Evaluate JavaScript
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs eval <target> <expr>
+~/.claude/skills/terminal-firefox/marionette.mjs eval <expression>
+
+# Click element by CSS selector
+~/.claude/skills/terminal-firefox/marionette.mjs click <selector>
+
+# Type text into element
+~/.claude/skills/terminal-firefox/marionette.mjs type <selector> <text>
 
 # Get page HTML
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs html <target> [selector]
+~/.claude/skills/terminal-firefox/marionette.mjs html [selector]
 
-# Screenshot
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs shot <target> [file]
+# Screenshot (PNG)
+~/.claude/skills/terminal-firefox/marionette.mjs shot [file]
 
-# Open new tab
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs open [url]
+# Get page title
+~/.claude/skills/terminal-firefox/marionette.mjs title
 
-# Raw CDP command
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs evalraw <target> <method> [json]
+# Get current URL
+~/.claude/skills/terminal-firefox/marionette.mjs url
+
+# Navigation
+~/.claude/skills/terminal-firefox/marionette.mjs back
+~/.claude/skills/terminal-firefox/marionette.mjs forward
+~/.claude/skills/terminal-firefox/marionette.mjs refresh
+
+# List all windows
+~/.claude/skills/terminal-firefox/marionette.mjs windows
 ```
 
 ## Typical workflow
 
 ```bash
-# 1. List tabs to get target ID
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs list
+# 1. Navigate
+~/.claude/skills/terminal-firefox/marionette.mjs nav "https://en.wikipedia.org"
 
-# 2. Interact
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs eval <target> "document.title"
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs click <target> "a.nav-link"
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs nav <target> "https://other-site.com"
+# 2. Get info
+~/.claude/skills/terminal-firefox/marionette.mjs title
+~/.claude/skills/terminal-firefox/marionette.mjs eval "document.body.innerText.slice(0, 3000)"
 
-# 3. Get page content
-CDP_PORT=9333 ~/.claude/skills/terminal-firefox/cdp.mjs eval <target> "document.body.innerText.slice(0, 3000)"
+# 3. Interact
+~/.claude/skills/terminal-firefox/marionette.mjs click "a.nav-link"
+~/.claude/skills/terminal-firefox/marionette.mjs type "input[name=search]" "hello world"
+
+# 4. Screenshot
+~/.claude/skills/terminal-firefox/marionette.mjs shot /tmp/firefox-screenshot.png
 ```
 
 ## Close
 
 ```bash
-# Close the browser pane and Firefox process
 tmux kill-pane -t "$PANE_ID" 2>/dev/null
-kill $FIREFOX_PID 2>/dev/null
 ```
 
 ## Notes
 
-- Browsh renders Firefox output as text and ANSI colors in the terminal
-- Firefox 57+ is required (for WebExtension support)
-- Uses CDP port range 9333-9340 (avoids conflicts with terminal-chromium on 9222-9230)
-- Some CDP commands (like `snap` for accessibility tree) may not be supported by Firefox's CDP implementation
-- Firefox's CDP support covers: Page, Runtime, DOM, Input, Network, and Page.captureScreenshot
+- Browsh renders Firefox as text + ANSI colors in the terminal
+- Firefox 57+ required (WebExtension support)
+- Marionette on port 2828 — both Browsh (session #1) and our script (session #2) share it
+- Firefox must be patched for multi-session support (Step 2) — re-apply after Firefox updates
+- Original `omni.ja` is backed up to `omni.ja.bak` before patching
+- To restore Firefox to original: `cp omni.ja.bak omni.ja` in Firefox's Resources directory
 - Works over SSH
 - Source: https://github.com/browsh-org/browsh
