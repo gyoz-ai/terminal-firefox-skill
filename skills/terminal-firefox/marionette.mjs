@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 // Marionette client for terminal-firefox
-// Creates a secondary Marionette session alongside Browsh and switches
-// to Browsh's browsing context for full programmatic control.
+// Creates a secondary Marionette session with its own independent Firefox window
+// for full-fidelity rendering and pixel-perfect screenshots.
+// Browsh holds session #1 for terminal rendering — this script operates separately
+// against the real Firefox instance at proper viewport resolution.
 // Requires patched Firefox (multi-session support via omni.ja patch).
 // Usage: marionette.mjs <command> [args...]
 
 import net from 'net';
 
 const PORT = parseInt(process.env.MARIONETTE_PORT || '2828');
+const VIEWPORT_WIDTH = parseInt(process.env.FIREFOX_WIDTH || '1280');
+const VIEWPORT_HEIGHT = parseInt(process.env.FIREFOX_HEIGHT || '800');
+const SESSION_MARKER = '__marionette_ctrl__';
+let browshHandle = null; // Browsh's window — nav syncs to it for terminal view
 const [,, cmd, ...args] = process.argv;
 
 function connect() {
@@ -72,43 +78,63 @@ function connect() {
 }
 
 async function initSession(client) {
-  // Create session #2 (Browsh holds session #1)
+  // Create session #2 — Browsh holds session #1 for terminal rendering.
+  // We operate in our own independent Firefox window for full-fidelity rendering.
   await client.send('WebDriver:NewSession', {
     capabilities: { alwaysMatch: { acceptInsecureCerts: true } }
   });
 
-  // Get all window handles and find Browsh's window
-  // Our new session starts with its own blank window — we need to switch
-  // to the window Browsh is using (the one with actual content)
-  const handles = await client.send('WebDriver:GetWindowHandles', {});
+  const freshHandle = await client.send('WebDriver:GetWindowHandle', {});
+  const allHandles = await client.send('WebDriver:GetWindowHandles', {});
+  let ourHandle = null;
 
-  if (handles.length > 1) {
-    // Try each handle to find one with real content (not about:blank/about:home)
-    const ownHandle = await client.send('WebDriver:GetWindowHandle', {});
-
-    for (const h of handles) {
-      if (h === ownHandle) continue;
-      await client.send('WebDriver:SwitchToWindow', { handle: h });
-      const urlResult = await client.send('WebDriver:GetCurrentURL', {});
-      const url = urlResult.value || '';
-      if (url && !url.startsWith('about:')) {
-        // Found Browsh's active window
-        return;
+  // Scan all existing windows to find our persistent window and Browsh's window
+  for (const h of allHandles) {
+    if (h === freshHandle) continue;
+    await client.send('WebDriver:SwitchToWindow', { handle: h });
+    try {
+      const result = await client.send('WebDriver:ExecuteScript', {
+        script: 'return window.name',
+        args: []
+      });
+      if (result.value === SESSION_MARKER) {
+        ourHandle = h;
+      } else {
+        // Non-marker window with real content is likely Browsh's
+        const urlResult = await client.send('WebDriver:GetCurrentURL', {});
+        const url = urlResult.value || '';
+        if (!browshHandle && url && !url.startsWith('about:')) {
+          browshHandle = h;
+        }
       }
-    }
-    // If no non-about: window found, switch to first non-own handle
-    for (const h of handles) {
-      if (h !== ownHandle) {
-        await client.send('WebDriver:SwitchToWindow', { handle: h });
-        return;
-      }
+    } catch {
+      // Can't execute scripts — likely Browsh's window on a restricted page
+      if (!browshHandle) browshHandle = h;
     }
   }
+
+  if (ourHandle) {
+    // Reuse persistent window — close the fresh blank one
+    await client.send('WebDriver:SwitchToWindow', { handle: freshHandle });
+    await client.send('WebDriver:CloseWindow', {});
+    await client.send('WebDriver:SwitchToWindow', { handle: ourHandle });
+  } else {
+    // No persistent window found — claim the fresh one as ours
+    await client.send('WebDriver:SwitchToWindow', { handle: freshHandle });
+    await client.send('WebDriver:ExecuteScript', {
+      script: `window.name = '${SESSION_MARKER}'`,
+      args: []
+    });
+  }
+
+  await client.send('WebDriver:SetWindowRect', {
+    width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT
+  });
 }
 
 async function run() {
   if (!cmd || cmd === 'help') {
-    console.log(`Marionette client for terminal-firefox (controls Browsh's browser)
+    console.log(`Marionette client for terminal-firefox (independent Firefox window)
 
 Commands:
   nav   <url>              — navigate to URL
@@ -116,13 +142,17 @@ Commands:
   click <selector>         — click element by CSS selector
   type  <selector> <text>  — type text into element
   html  [selector]         — get page HTML
-  shot  [file]             — screenshot (saves PNG)
+  shot  [file]             — screenshot (full-fidelity PNG)
   title                    — get page title
   url                      — get current URL
   back                     — go back
   forward                  — go forward
   refresh                  — refresh page
-  windows                  — list all window handles with URLs`);
+  windows                  — list all window handles with URLs
+
+Env vars:
+  FIREFOX_WIDTH   — viewport width  (default: 1280)
+  FIREFOX_HEIGHT  — viewport height (default: 800)`);
     return;
   }
 
@@ -135,7 +165,15 @@ Commands:
       case 'nav': {
         const url = args[0];
         if (!url) { console.error('Missing URL'); process.exit(1); }
+        // Navigate our full-fidelity window
         await client.send('WebDriver:Navigate', { url });
+        // Also navigate Browsh's window so the terminal view stays in sync
+        if (browshHandle) {
+          const ourH = await client.send('WebDriver:GetWindowHandle', {});
+          await client.send('WebDriver:SwitchToWindow', { handle: browshHandle });
+          await client.send('WebDriver:Navigate', { url });
+          await client.send('WebDriver:SwitchToWindow', { handle: ourH });
+        }
         console.log(`Navigated to: ${url}`);
         break;
       }
@@ -221,7 +259,14 @@ Commands:
           await client.send('WebDriver:SwitchToWindow', { handle: h });
           const t = await client.send('WebDriver:GetTitle', {});
           const u = await client.send('WebDriver:GetCurrentURL', {});
-          console.log(`${h.slice(0, 8)}  ${(u.value || '').padEnd(50)}  ${t.value || ''}`);
+          let label = '';
+          try {
+            const n = await client.send('WebDriver:ExecuteScript', {
+              script: 'return window.name', args: []
+            });
+            label = n.value === SESSION_MARKER ? ' [marionette]' : '';
+          } catch { /* skip */ }
+          console.log(`${h.slice(0, 8)}  ${(u.value || '').padEnd(50)}  ${t.value || ''}${label}`);
         }
         break;
       }
