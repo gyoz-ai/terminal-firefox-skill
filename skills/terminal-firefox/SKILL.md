@@ -1,17 +1,18 @@
 ---
 name: terminal-firefox
-description: Terminal-native Firefox browser with Marionette remote control via Browsh. Renders real web pages in the terminal using text and color. Requires a one-time Firefox patch to allow multiple Marionette sessions (Browsh + control script). Use for browsing, debugging, testing, and inspecting web pages.
+description: Terminal-native Firefox browser with Marionette remote control. Browsh provides terminal rendering while Marionette operates directly against the Firefox instance in its own window for full-fidelity screenshots and interaction. Requires a one-time Firefox patch for multi-session support. Use for browsing, debugging, testing, and inspecting web pages.
 ---
 
 # Terminal Firefox
 
-A full Firefox browser that renders in your terminal via Browsh. Uses Firefox's Marionette protocol for programmatic control — navigate, evaluate JS, click, type, extract HTML, and take screenshots.
+A full Firefox browser with dual interfaces: Browsh renders in your terminal for live viewing, while Marionette controls a separate Firefox window directly for full-fidelity screenshots and programmatic control — navigate, evaluate JS, click, type, extract HTML, and take pixel-perfect screenshots.
 
 ## How it works
 
-- **Browsh** renders Firefox in the terminal via a WebExtension that captures headless Firefox output
-- Browsh holds **Marionette session #1** for its internal communication with Firefox
-- The `marionette.mjs` script creates **session #2** and switches to Browsh's browser window for control
+- **Browsh** renders Firefox in the terminal via a WebExtension that captures Firefox output — holds **Marionette session #1**
+- The `marionette.mjs` script creates **session #2** with its **own independent Firefox window** at proper viewport resolution (default 1280x800)
+- Marionette operates directly against the Firefox rendering engine — screenshots capture the exact page with all CSS effects, animations, and visual fidelity
+- The Marionette window persists across invocations (identified via `window.name` marker) to avoid zombie windows
 - Firefox is patched (one-time) to allow multiple concurrent Marionette sessions (default is hardcoded to 1)
 
 ## Launch browser (when /terminal-firefox is invoked)
@@ -236,14 +237,15 @@ sleep 2
 ### Step 6: Use Marionette
 
 After launch, use the Marionette commands below to interact with the browser.
-The script auto-creates session #2 and switches to Browsh's browser window.
+The script auto-creates session #2 with its own independent Firefox window (1280x800 viewport).
+Navigation and screenshots happen in this window, separate from Browsh's terminal view.
 
 ## Marionette Commands
 
 All commands use the script at `~/.claude/skills/terminal-firefox/marionette.mjs`.
 
 ```bash
-# Navigate to URL (updates Browsh's terminal view)
+# Navigate to URL (syncs both Marionette window + Browsh terminal)
 ~/.claude/skills/terminal-firefox/marionette.mjs nav <url>
 
 # Evaluate JavaScript
@@ -258,7 +260,7 @@ All commands use the script at `~/.claude/skills/terminal-firefox/marionette.mjs
 # Get page HTML
 ~/.claude/skills/terminal-firefox/marionette.mjs html [selector]
 
-# Screenshot (PNG)
+# Screenshot (full-fidelity PNG from Marionette's own window)
 ~/.claude/skills/terminal-firefox/marionette.mjs shot [file]
 
 # Get page title
@@ -310,6 +312,11 @@ tmux kill-pane -t "$PANE_ID" 2>/dev/null
 
 ## Notes
 
+- **Dual-window architecture**: Browsh renders in terminal (session #1), Marionette has its own 1280x800 window (session #2) for full-fidelity rendering
+- `nav` syncs both windows; `click`/`type`/`eval` operate only on the Marionette window
+- `shot` captures pixel-perfect screenshots from Marionette's window (all CSS effects, animations, etc.)
+- Viewport size configurable via `FIREFOX_WIDTH` / `FIREFOX_HEIGHT` env vars
+- Marionette window persists via `window.name` marker — no zombie windows across invocations
 - Browsh renders Firefox as text + ANSI colors in the terminal
 - Firefox 57+ required (WebExtension support)
 - Marionette on port 2828 — both Browsh (session #1) and our script (session #2) share it
